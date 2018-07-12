@@ -1,0 +1,335 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <Adafruit_NeoPixel.h>
+#include <Arduino.h>
+#include <EEPROM.h>
+#include <TinyGPS.h>
+#include <SoftwareSerial.h>
+#include <SoftwareSerial.h>
+
+////!!!!!!!
+//client
+////!!!!!!!
+
+TinyGPS gps;
+SoftwareSerial nss(D2, D1);
+float gpsVal1 = 0, gpsVal2 = 0;
+
+// AP Wi-Fi credentials
+const char* ssid = "bracelets";
+const char* password = "12345678";
+
+// Local ESP web-server address
+String serverHost = "http://192.168.4.1/feed";
+String data;
+
+// Static network configuration
+IPAddress ip(192, 168, 4, 4);
+IPAddress gateway(192, 168, 4, 1);
+IPAddress subnet(255, 255, 255, 0);
+
+WiFiClient client;
+
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(12, D6, NEO_GRB + NEO_KHZ800);
+
+struct Data{
+  int age;           // 16+
+  int m_min_age;     // 16
+  int m_max_age;     // 120
+  int height;        // (cm)
+  int m_min_height;
+  int m_max_height;
+  char gender;       //male, female, hermaphrodite, trans, other
+  char m_gender[5];
+};
+
+Data my_data;
+
+int level = 1;
+int color1, color2, color3;
+
+int rssi = 1;
+
+int noConnCount = 0;
+
+void getRSSI(String target_ssid)
+{
+  byte available_networks = WiFi.scanNetworks();
+  for (int network = 0; network < available_networks; network++)
+    if (WiFi.SSID(network).equals(target_ssid)){
+      rssi = WiFi.RSSI(network); //rssi is negative here
+	  noConnCount = 0;
+	  return;
+	  }
+
+  rssi = 0;
+  noConnCount++;
+}
+
+void turnOff(int i)
+{
+  strip.setPixelColor(i, strip.Color(0, 0, 0));
+}
+
+void p(String str)
+{
+  Serial.println("");
+  Serial.println(str);
+}
+  
+void p(int num)
+{
+  Serial.println("");
+  Serial.println(""+num);
+}
+
+void(* resetFunc) (void) = 0; //declare reset function @ address 0
+ 
+void setup()
+{
+  Serial.begin(9600);
+  
+  // EEPROM SETUP
+  EEPROM.begin(512);
+  while (!Serial) { ; }// wait for serial port to connect. Needed for native USB port only
+  
+  int saving = 0;
+  if(saving){ //saving // testinggggg
+    my_data.age = 27;
+    my_data.m_min_age = 20;
+    my_data.m_max_age = 70; 
+    my_data.height = 185;
+    my_data.m_min_height = 180;
+    my_data.m_max_height = 190;
+    my_data.gender = 'm';
+    my_data.m_gender[0] = 'n'; //other
+    my_data.m_gender[1] = 'n'; //male
+    my_data.m_gender[2] = 'y'; //female
+    my_data.m_gender[3] = 'n'; //herma
+    my_data.m_gender[4] = 'n'; //trans
+    EEPROM.put(0, my_data);  // Get the data from wemos
+    EEPROM.commit();
+    
+    p("DATA SAVED!");
+  }else{ //loading
+    EEPROM.get(0, my_data);  // Get the data from wemos
+    p("Age: "+ String(my_data.age) + "\n"
+      +"Height: " + String(my_data.height) + "\n"
+      +"Min Height: " + String(my_data.m_min_height) + "\n"
+      +"Max Height: " + String(my_data.m_max_height) + "\n");
+  }
+
+  strip.begin();
+  strip.setBrightness(30); //adjust brightness here
+  strip.show(); // Initialize all pixels to 'off'
+  strip.setPixelColor(0, strip.Color(255, 0, 0));
+  strip.show();
+  
+  ESP.eraseConfig();
+  WiFi.persistent(false);
+  Serial.println();
+  Serial.println("******** BEGIN ***********");
+  WiFi.mode(WIFI_STA);
+  Serial.println("- connecting to wifi");
+  WiFi.config(ip, gateway, subnet); 
+  WiFi.begin(ssid, password);
+  Serial.println("");
+  while (WiFi.status() != WL_CONNECTED){
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("- wifi connected");
+  
+  buildMyData();
+  Serial.println();
+  
+  delay(3000);
+  buildAnswerData();
+  
+  p("my levle "+String(level));
+  
+  delay(1000);
+  
+  if(level == 5) //no match
+    resetFunc(); //call restart
+}
+
+int checkMatch(int age, int height, char gender){
+  if(age < my_data.m_min_age || age > my_data.m_max_age){
+    p("bad age "); p(age); p(my_data.m_min_age); p(my_data.m_max_age);
+  return 0;
+  }
+  
+  if(height < my_data.m_min_height || height > my_data.m_max_height){
+    p("bad height ") ;p(height); p(my_data.m_min_height); p(my_data.m_max_height );
+    return 0;
+  }
+  
+  if((gender == 'm' && my_data.m_gender[1]) || (gender == 'f' && my_data.m_gender[2]) || (gender == 'h' &&  my_data.m_gender[3]) || (gender == 't' && my_data.m_gender[4]) || (gender == 'o' && my_data.m_gender[0])){
+    return 1;
+  }else{
+    p("bad gender "); p(gender);
+  return 0;
+  }
+  
+  return 1;
+}
+
+void sendHttpRequest()
+{
+  HTTPClient http;
+  
+  if(level == 1){
+  
+    const char* headers[] = {"age", "height", "gender", "color"};
+    size_t size = sizeof(headers)/sizeof(char*);
+    http.begin(serverHost);
+  
+    http.addHeader("age", String(my_data.age));
+    http.addHeader("height", String(my_data.height));
+    http.addHeader("gender", String(my_data.gender));
+    http.addHeader("color", String(0));
+  
+    http.collectHeaders(headers, size);
+    http.POST(data);
+  
+    String age, height, gender, color;
+    age = http.header("age");
+    height = http.header("height");
+    gender = http.header("gender");
+    color = http.header("color");
+   
+    int color_num = color.toInt();
+    color3 = color_num >> 16;
+    color2 = (color_num >> 8)%256;
+    color1 = color_num % 256;
+
+    // p("Age: ("+ String(http.hasHeader("age"))+")");
+    // p("height: ("+ String(http.hasHeader("height"))+")");
+  
+    if(!checkMatch(age.toInt(), height.toInt(), gender[0])){ //no match
+      level = 5;
+      http.end();
+      return;
+    }
+ 
+    p("server matches me");
+    level = 2; //continue to loop
+    http.end();
+    return;
+  }
+  
+  if(level == 2){
+    http.begin(serverHost);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    http.POST(data);
+    http.writeToStream(&Serial);
+    http.end();
+    //level = 3; //continue to loop
+    return;
+  }
+}
+
+void buildMyData()
+{
+  data = "age=" + String(my_data.age);
+  data += "&height=" + String(my_data.height);
+  data += "&gender=" + String(my_data.gender);
+  sendHttpRequest();
+}
+
+void buildAnswerData()
+{
+  if(level == 5){
+    data = "ans=nop";
+    sendHttpRequest();
+    p("I have refused");
+    return;
+  }
+  
+  p("I have accepted");
+  data = "ans=ok";
+  sendHttpRequest();
+}
+
+void buildGPSData()
+{
+  //if(gpsVal1 == 1000) return; //avoid false value
+  data = "rssi=" + String(rssi);
+  data += "&gps1=" + String(gpsVal1);
+  data += "&gps2=" + String(gpsVal2);
+  p("sending: "+data);
+  
+  delay(10);
+  sendHttpRequest();
+}
+
+void getMyGPS_andRSSI_Data()
+{
+  unsigned long start = millis();
+  do 
+  {
+    while (nss.available())
+      gps.encode(nss.read());
+  } while (millis() - start < 1000);
+  
+  float flat, flon;
+  unsigned long age;
+  gps.f_get_position(&flat, &flon, &age);
+  
+  gpsVal1=flat;
+  gpsVal2=flon;
+  }
+
+void displayWIFIdata()
+{  
+  getRSSI(ssid);
+  p(String(rssi));
+  int del = (-rssi) * 4 - 155;
+  if(del < 5) del = 5;
+  
+  buildGPSData();
+  
+  if(rssi < 0){
+    rssiRingCircling(del);
+    return; 
+  }
+  
+  //red dot - no connection (after some connection was made in the past)
+  strip.setPixelColor(0, strip.Color(255, 0, 0));
+  strip.show();
+}
+
+void rssiRingCircling(int del)
+{
+  for(uint16_t i = 0; i < strip.numPixels(); i++){
+    delay(del);
+    if(i > 0) turnOff(i - 1);
+    strip.setPixelColor(i, strip.Color(color1, color2, color3));
+    strip.show();
+  }
+  delay(del);
+  turnOff(strip.numPixels() - 1);
+  strip.show();
+}
+
+void diplayGPSdata()
+{
+  buildGPSData();
+  
+  //activate leds to show direction...........
+}
+
+void loop()
+{
+  getMyGPS_andRSSI_Data();
+  //diplayGPSdata();
+  //if(gpsVal1 != 1000) delay(500); //if not default value then wait
+  
+  //if gps doesnt work
+  displayWIFIdata();
+  
+  if(noConnCount > 4)
+    resetFunc(); //call restart
+}
