@@ -7,4 +7,4 @@ Code written under Arduino IDE.
 
 Bracelet Pictures:
 
-![alt text](https://raw.githubusercontent.com/sk8erpunk/bracelet-matchmaker/master/pics/pic1.png)
+![Bracelet](https://raw.githubusercontent.com/sk8erpunk/Bracelet-MatchMaker/master/Pics/pic1.jpg)
